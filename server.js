@@ -3,16 +3,19 @@ const axios = require("axios");
 const path = require("path");
 const fs = require("fs/promises");
 const fssync = require("fs");
+const http = require("http");
 const crypto = require("crypto");
 const { exec } = require("child_process");
 const { PNG } = require("pngjs");
 const pngToIco = require("png-to-ico");
 const sharp = require("sharp");
 const multer = require("multer");
+const { WebSocketServer, WebSocket } = require("ws");
 const { parse: parseDomain } = require("tldts");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const server = http.createServer(app);
 
 const ROOT_DIR = __dirname;
 const TEMP_DIR = path.join(ROOT_DIR, "temp");
@@ -20,7 +23,12 @@ const OUTPUT_DIR = path.join(ROOT_DIR, "output");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 
 const buildJobs = new Map();
+const buildStatusSubscribers = new Map();
 const JOB_RETENTION_MS = 1000 * 60 * 60;
+const buildStatusSocketServer = new WebSocketServer({
+  server,
+  path: "/ws/build-status",
+});
 
 const BUILD_STAGES = {
   queued: { label: "Queued", progress: 1, etaSeconds: 230 },
@@ -51,6 +59,41 @@ const upload = multer({
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(PUBLIC_DIR));
+
+buildStatusSocketServer.on("connection", (socket, request) => {
+  let jobId = "";
+
+  try {
+    const parsedUrl = new URL(String(request.url || ""), "http://localhost");
+    jobId = String(parsedUrl.searchParams.get("jobId") || "").trim();
+  } catch (_error) {
+    jobId = "";
+  }
+
+  if (!jobId) {
+    socket.close(1008, "Missing jobId");
+    return;
+  }
+
+  if (!buildJobs.has(jobId)) {
+    socket.send(
+      JSON.stringify({ success: false, error: "Build job not found." }),
+    );
+    socket.close(1008, "Build job not found");
+    return;
+  }
+
+  addBuildStatusSubscriber(jobId, socket);
+  sendJobStatusToSocket(jobId, socket);
+
+  socket.on("close", () => {
+    removeBuildStatusSubscriber(jobId, socket);
+  });
+
+  socket.on("error", () => {
+    removeBuildStatusSubscriber(jobId, socket);
+  });
+});
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
@@ -149,25 +192,7 @@ app.get("/build-status/:jobId", (req, res) => {
       .json({ success: false, error: "Build job not found." });
   }
 
-  return res.json({
-    success: true,
-    job: {
-      id: job.id,
-      status: job.status,
-      stageKey: job.stageKey,
-      stageLabel: job.stageLabel,
-      progress: job.progress,
-      etaSeconds: job.etaSeconds,
-      elapsedSeconds: Math.max(
-        0,
-        Math.round((Date.now() - job.startedAt) / 1000),
-      ),
-      appName: job.appName,
-      hasCustomLogo: Boolean(job.hasCustomLogo),
-      downloadUrl: job.downloadUrl,
-      error: job.error,
-    },
-  });
+  return res.json({ success: true, job: formatJobPayload(job) });
 });
 
 app.get("/download/:fileName", async (req, res) => {
@@ -207,7 +232,7 @@ app.use((error, _req, res, next) => {
   return next();
 });
 
-app.listen(PORT, async () => {
+server.listen(PORT, async () => {
   await fs.mkdir(TEMP_DIR, { recursive: true });
   await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
@@ -265,6 +290,7 @@ async function runBuildJob(jobId, normalizedUrl, appName, customLogoBuffer) {
       job.etaSeconds = 0;
       job.downloadUrl = `/download/${encodeURIComponent(outputFileName)}`;
       job.updatedAt = Date.now();
+      broadcastJobStatus(jobId);
     }
   } catch (error) {
     const job = buildJobs.get(jobId);
@@ -276,6 +302,7 @@ async function runBuildJob(jobId, normalizedUrl, appName, customLogoBuffer) {
       job.etaSeconds = 0;
       job.error = simplifyError(error);
       job.updatedAt = Date.now();
+      broadcastJobStatus(jobId);
     }
   } finally {
     await fs.rm(jobDir, { recursive: true, force: true }).catch(() => {});
@@ -296,6 +323,7 @@ function setJobStage(jobId, stageKey) {
   job.progress = stage.progress;
   job.etaSeconds = stage.etaSeconds;
   job.updatedAt = Date.now();
+  broadcastJobStatus(jobId);
 }
 
 function cleanupOldJobs() {
@@ -303,9 +331,84 @@ function cleanupOldJobs() {
   for (const [jobId, job] of buildJobs.entries()) {
     const finished = job.status === "done" || job.status === "failed";
     if (finished && now - job.updatedAt > JOB_RETENTION_MS) {
+      closeJobStatusSubscribers(jobId);
       buildJobs.delete(jobId);
     }
   }
+}
+
+function formatJobPayload(job) {
+  return {
+    id: job.id,
+    status: job.status,
+    stageKey: job.stageKey,
+    stageLabel: job.stageLabel,
+    progress: job.progress,
+    etaSeconds: job.etaSeconds,
+    elapsedSeconds: Math.max(
+      0,
+      Math.round((Date.now() - job.startedAt) / 1000),
+    ),
+    appName: job.appName,
+    hasCustomLogo: Boolean(job.hasCustomLogo),
+    downloadUrl: job.downloadUrl,
+    error: job.error,
+  };
+}
+
+function addBuildStatusSubscriber(jobId, socket) {
+  const sockets = buildStatusSubscribers.get(jobId) || new Set();
+  sockets.add(socket);
+  buildStatusSubscribers.set(jobId, sockets);
+}
+
+function removeBuildStatusSubscriber(jobId, socket) {
+  const sockets = buildStatusSubscribers.get(jobId);
+  if (!sockets) {
+    return;
+  }
+
+  sockets.delete(socket);
+  if (sockets.size === 0) {
+    buildStatusSubscribers.delete(jobId);
+  }
+}
+
+function sendJobStatusToSocket(jobId, socket) {
+  const job = buildJobs.get(jobId);
+  if (!job || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  socket.send(JSON.stringify({ success: true, job: formatJobPayload(job) }));
+}
+
+function broadcastJobStatus(jobId) {
+  const sockets = buildStatusSubscribers.get(jobId);
+  if (!sockets || sockets.size === 0) {
+    return;
+  }
+
+  for (const socket of sockets) {
+    sendJobStatusToSocket(jobId, socket);
+  }
+}
+
+function closeJobStatusSubscribers(jobId) {
+  const sockets = buildStatusSubscribers.get(jobId);
+  if (!sockets) {
+    return;
+  }
+
+  for (const socket of sockets) {
+    try {
+      socket.close(1000, "Job expired");
+    } catch (_error) {
+      // Ignore close errors.
+    }
+  }
+
+  buildStatusSubscribers.delete(jobId);
 }
 
 function normalizeUrl(inputUrl) {
@@ -575,8 +678,6 @@ function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
-    minWidth: 900,
-    minHeight: 620,
     icon: 'assets/icon.ico',
     autoHideMenuBar: true,
     webPreferences: {

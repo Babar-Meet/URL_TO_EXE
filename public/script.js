@@ -19,6 +19,12 @@ let userEditedAppName = false;
 let analyzeTimer = null;
 let analyzeController = null;
 let statusPollTimer = null;
+let etaTickTimer = null;
+let statusSocket = null;
+let wsFallbackTimer = null;
+let latestServerJob = null;
+let latestServerJobTimestamp = 0;
+let activeJobId = "";
 let detectedLogoUrl = "";
 let customLogoObjectUrl = "";
 
@@ -53,7 +59,6 @@ logoInput.addEventListener("change", () => {
     customLogoObjectUrl = URL.createObjectURL(file);
     logoPreview.src = customLogoObjectUrl;
     logoPreview.classList.add("ready");
-    insights.classList.remove("hidden");
     return;
   }
 
@@ -79,7 +84,7 @@ buildForm.addEventListener("submit", async (event) => {
   const appName = appNameInput.value.trim();
   const logoFile = logoInput.files && logoInput.files[0];
 
-  stopPolling();
+  stopRealtimeUpdates();
   resetBuildUiForStart();
   setStatus("", "");
 
@@ -103,7 +108,7 @@ buildForm.addEventListener("submit", async (event) => {
       throw new Error(data.error || "Could not start build.");
     }
 
-    pollBuildStatus(data.jobId);
+    startBuildStatusUpdates(data.jobId);
   } catch (error) {
     setStatus(error.message || "Build failed.", "error");
     buildButton.disabled = false;
@@ -135,7 +140,6 @@ async function analyzeUrl(rawUrl) {
       return;
     }
 
-    insights.classList.remove("hidden");
     detectedLogoUrl = data.logoUrl || "";
 
     if (!userEditedAppName) {
@@ -153,10 +157,91 @@ async function analyzeUrl(rawUrl) {
   }
 }
 
-async function pollBuildStatus(jobId) {
-  stopPolling();
+function startBuildStatusUpdates(jobId) {
+  stopRealtimeUpdates();
+  activeJobId = jobId;
+  startEtaTicker();
+
+  const wsEnabled = connectStatusSocket(jobId);
+  if (!wsEnabled) {
+    startStatusPolling(jobId);
+  }
+}
+
+function connectStatusSocket(jobId) {
+  if (
+    typeof window === "undefined" ||
+    typeof window.WebSocket === "undefined"
+  ) {
+    return false;
+  }
+
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+  const wsUrl = `${protocol}://${window.location.host}/ws/build-status?jobId=${encodeURIComponent(jobId)}`;
+  let hasReceivedMessage = false;
+
+  try {
+    statusSocket = new window.WebSocket(wsUrl);
+  } catch (_error) {
+    statusSocket = null;
+    return false;
+  }
+
+  wsFallbackTimer = setTimeout(() => {
+    if (activeJobId === jobId && !hasReceivedMessage && !statusPollTimer) {
+      startStatusPolling(jobId);
+    }
+  }, 2500);
+
+  statusSocket.addEventListener("message", (event) => {
+    hasReceivedMessage = true;
+
+    try {
+      const data = JSON.parse(String(event.data || "{}"));
+      if (data.success && data.job) {
+        handleJobUpdate(data.job);
+      }
+    } catch (_error) {
+      // Ignore transient socket payload parse issues.
+    }
+  });
+
+  statusSocket.addEventListener("error", () => {
+    if (activeJobId === jobId && !statusPollTimer) {
+      startStatusPolling(jobId);
+    }
+  });
+
+  statusSocket.addEventListener("close", () => {
+    statusSocket = null;
+
+    if (wsFallbackTimer) {
+      clearTimeout(wsFallbackTimer);
+      wsFallbackTimer = null;
+    }
+
+    if (
+      activeJobId === jobId &&
+      !isJobTerminal(latestServerJob) &&
+      !statusPollTimer
+    ) {
+      startStatusPolling(jobId);
+    }
+  });
+
+  return true;
+}
+
+function startStatusPolling(jobId) {
+  if (statusPollTimer) {
+    clearInterval(statusPollTimer);
+  }
 
   const run = async () => {
+    if (activeJobId !== jobId) {
+      return;
+    }
+
     try {
       const response = await fetch(
         `/build-status/${encodeURIComponent(jobId)}`,
@@ -167,38 +252,71 @@ async function pollBuildStatus(jobId) {
         throw new Error(data.error || "Failed to read build status.");
       }
 
-      renderBuildProgress(data.job);
-
-      if (data.job.status === "done") {
-        setStatus("Done. Your EXE is ready to download.", "success");
-        if (data.job.downloadUrl) {
-          downloadLink.href = data.job.downloadUrl;
-          downloadLink.classList.remove("hidden");
-        }
-        buildButton.disabled = false;
-        stopPolling();
-        return;
-      }
-
-      if (data.job.status === "failed") {
-        setStatus(data.job.error || "Build failed.", "error");
-        buildButton.disabled = false;
-        stopPolling();
-      }
+      handleJobUpdate(data.job);
     } catch (error) {
       setStatus(error.message || "Build status check failed.", "error");
       buildButton.disabled = false;
-      stopPolling();
+      stopRealtimeUpdates();
     }
   };
 
-  await run();
-  statusPollTimer = setInterval(run, 1200);
+  run();
+  statusPollTimer = setInterval(run, 1000);
+}
+
+function handleJobUpdate(job) {
+  latestServerJob = job;
+  latestServerJobTimestamp = Date.now();
+  renderBuildProgress(job);
+
+  if (job.status === "done") {
+    setStatus("Done. Your EXE is ready to download.", "success");
+    if (job.downloadUrl) {
+      downloadLink.href = job.downloadUrl;
+      downloadLink.classList.remove("hidden");
+    }
+    buildButton.disabled = false;
+    stopRealtimeUpdates();
+    return;
+  }
+
+  if (job.status === "failed") {
+    setStatus(job.error || "Build failed.", "error");
+    buildButton.disabled = false;
+    stopRealtimeUpdates();
+  }
+}
+
+function startEtaTicker() {
+  if (etaTickTimer) {
+    clearInterval(etaTickTimer);
+  }
+
+  etaTickTimer = setInterval(() => {
+    if (!latestServerJob || isJobTerminal(latestServerJob)) {
+      return;
+    }
+
+    const deltaSeconds = Math.max(
+      0,
+      Math.floor((Date.now() - latestServerJobTimestamp) / 1000),
+    );
+
+    const estimatedJob = {
+      ...latestServerJob,
+      etaSeconds: Math.max(
+        0,
+        Number(latestServerJob.etaSeconds || 0) - deltaSeconds,
+      ),
+      elapsedSeconds:
+        Number(latestServerJob.elapsedSeconds || 0) + deltaSeconds,
+    };
+
+    renderBuildProgress(estimatedJob);
+  }, 1000);
 }
 
 function renderBuildProgress(job) {
-  insights.classList.remove("hidden");
-
   stageLabel.textContent = job.stageLabel || "Processing";
 
   const progress = clampPercent(job.progress || 0);
@@ -215,7 +333,7 @@ function renderBuildProgress(job) {
 
   if (job.status === "running") {
     setStatus(
-      `${job.stageLabel || "Processing"} (${progress}%) • ETA ${formatDuration(job.etaSeconds)}`,
+      `${job.stageLabel || "Processing"} (${progress}%) - ETA ${formatDuration(job.etaSeconds)}`,
       "",
     );
   }
@@ -254,7 +372,8 @@ function markStageProgress(stageKey, status) {
 function resetBuildUiForStart() {
   buildButton.disabled = true;
   downloadLink.classList.add("hidden");
-  insights.classList.remove("hidden");
+  latestServerJob = null;
+  latestServerJobTimestamp = 0;
 
   renderBuildProgress({
     stageLabel: "Queued",
@@ -268,7 +387,6 @@ function resetBuildUiForStart() {
 }
 
 function resetInsights() {
-  insights.classList.add("hidden");
   detectedLogoUrl = "";
   logoPreview.removeAttribute("src");
   logoPreview.classList.remove("ready");
@@ -285,10 +403,35 @@ function hasCustomLogoSelected() {
   return Boolean(logoInput.files && logoInput.files.length > 0);
 }
 
-function stopPolling() {
+function isJobTerminal(job) {
+  return Boolean(job && (job.status === "done" || job.status === "failed"));
+}
+
+function stopRealtimeUpdates() {
+  activeJobId = "";
+
   if (statusPollTimer) {
     clearInterval(statusPollTimer);
     statusPollTimer = null;
+  }
+
+  if (etaTickTimer) {
+    clearInterval(etaTickTimer);
+    etaTickTimer = null;
+  }
+
+  if (wsFallbackTimer) {
+    clearTimeout(wsFallbackTimer);
+    wsFallbackTimer = null;
+  }
+
+  if (statusSocket) {
+    try {
+      statusSocket.close();
+    } catch (_error) {
+      // Ignore close errors.
+    }
+    statusSocket = null;
   }
 }
 
