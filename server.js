@@ -21,6 +21,8 @@ const ROOT_DIR = __dirname;
 const TEMP_DIR = path.join(ROOT_DIR, "temp");
 const OUTPUT_DIR = path.join(ROOT_DIR, "output");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
+const APP_NAME_MAX_LENGTH = 80;
+const APP_SLUG_MAX_LENGTH = 60;
 
 const buildJobs = new Map();
 const buildStatusSubscribers = new Map();
@@ -31,24 +33,50 @@ const buildStatusSocketServer = new WebSocketServer({
 });
 
 const BUILD_STAGES = {
-  queued: { label: "Queued", progress: 1, etaSeconds: 230 },
-  validating: { label: "Validating URL", progress: 5, etaSeconds: 220 },
-  fetchingLogo: { label: "Fetching logo", progress: 15, etaSeconds: 210 },
+  queued: { label: "Queued", progress: 1 },
+  validating: { label: "Validating URL", progress: 5 },
+  fetchingLogo: { label: "Fetching logo", progress: 15 },
   preparingProject: {
     label: "Preparing Electron project",
     progress: 28,
-    etaSeconds: 200,
   },
   installingDeps: {
     label: "Installing dependencies",
     progress: 45,
-    etaSeconds: 180,
   },
-  packaging: { label: "Packaging instant EXE", progress: 82, etaSeconds: 80 },
-  finalizing: { label: "Finalizing output", progress: 96, etaSeconds: 20 },
-  done: { label: "Completed", progress: 100, etaSeconds: 0 },
-  failed: { label: "Failed", progress: 100, etaSeconds: 0 },
+  packaging: { label: "Packaging instant EXE", progress: 82 },
+  finalizing: { label: "Finalizing output", progress: 96 },
+  done: { label: "Completed", progress: 100 },
+  failed: { label: "Failed", progress: 100 },
 };
+
+const STAGE_SEQUENCE = [
+  "validating",
+  "fetchingLogo",
+  "preparingProject",
+  "installingDeps",
+  "packaging",
+  "finalizing",
+];
+
+const STAGE_DEFAULT_DURATIONS_SECONDS = {
+  validating: 4,
+  fetchingLogo: 10,
+  preparingProject: 8,
+  installingDeps: 55,
+  packaging: 140,
+  finalizing: 8,
+};
+
+const stageDurationStats = Object.fromEntries(
+  STAGE_SEQUENCE.map((stageKey) => [
+    stageKey,
+    {
+      avgSeconds: STAGE_DEFAULT_DURATIONS_SECONDS[stageKey],
+      samples: 0,
+    },
+  ]),
+);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -163,7 +191,7 @@ app.post("/build", upload.single("logoFile"), (req, res) => {
     stageKey: "queued",
     stageLabel: BUILD_STAGES.queued.label,
     progress: BUILD_STAGES.queued.progress,
-    etaSeconds: BUILD_STAGES.queued.etaSeconds,
+    stageStartedAt: startedAt,
     startedAt,
     updatedAt: startedAt,
     appName: resolvedAppName,
@@ -237,6 +265,7 @@ server.listen(PORT, async () => {
   await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
   setInterval(cleanupOldJobs, 1000 * 60 * 10).unref();
+  setInterval(broadcastActiveJobStatuses, 1000).unref();
 
   console.log(`URL to EXE builder running at http://localhost:${PORT}`);
 });
@@ -283,11 +312,11 @@ async function runBuildJob(jobId, normalizedUrl, appName, customLogoBuffer) {
 
     const job = buildJobs.get(jobId);
     if (job) {
+      finalizeCurrentStage(job, Date.now());
       job.status = "done";
       job.stageKey = "done";
       job.stageLabel = BUILD_STAGES.done.label;
       job.progress = BUILD_STAGES.done.progress;
-      job.etaSeconds = 0;
       job.downloadUrl = `/download/${encodeURIComponent(outputFileName)}`;
       job.updatedAt = Date.now();
       broadcastJobStatus(jobId);
@@ -295,11 +324,11 @@ async function runBuildJob(jobId, normalizedUrl, appName, customLogoBuffer) {
   } catch (error) {
     const job = buildJobs.get(jobId);
     if (job) {
+      finalizeCurrentStage(job, Date.now());
       job.status = "failed";
       job.stageKey = "failed";
       job.stageLabel = BUILD_STAGES.failed.label;
       job.progress = 100;
-      job.etaSeconds = 0;
       job.error = simplifyError(error);
       job.updatedAt = Date.now();
       broadcastJobStatus(jobId);
@@ -312,17 +341,20 @@ async function runBuildJob(jobId, normalizedUrl, appName, customLogoBuffer) {
 function setJobStage(jobId, stageKey) {
   const job = buildJobs.get(jobId);
   const stage = BUILD_STAGES[stageKey];
+  const now = Date.now();
 
   if (!job || !stage) {
     return;
   }
 
+  finalizeCurrentStage(job, now);
+
   job.status = "running";
   job.stageKey = stageKey;
   job.stageLabel = stage.label;
   job.progress = stage.progress;
-  job.etaSeconds = stage.etaSeconds;
-  job.updatedAt = Date.now();
+  job.stageStartedAt = now;
+  job.updatedAt = now;
   broadcastJobStatus(jobId);
 }
 
@@ -338,22 +370,130 @@ function cleanupOldJobs() {
 }
 
 function formatJobPayload(job) {
+  const now = Date.now();
+
   return {
     id: job.id,
     status: job.status,
     stageKey: job.stageKey,
     stageLabel: job.stageLabel,
     progress: job.progress,
-    etaSeconds: job.etaSeconds,
-    elapsedSeconds: Math.max(
-      0,
-      Math.round((Date.now() - job.startedAt) / 1000),
-    ),
+    etaSeconds: calculateDynamicEtaSeconds(job, now),
+    elapsedSeconds: Math.max(0, Math.round((now - job.startedAt) / 1000)),
     appName: job.appName,
     hasCustomLogo: Boolean(job.hasCustomLogo),
     downloadUrl: job.downloadUrl,
     error: job.error,
   };
+}
+
+function finalizeCurrentStage(job, now) {
+  if (!job || !job.stageStartedAt || job.status !== "running") {
+    return;
+  }
+
+  const stageKey = String(job.stageKey || "");
+  if (!STAGE_DEFAULT_DURATIONS_SECONDS[stageKey]) {
+    return;
+  }
+
+  const durationSeconds = Math.max(
+    1,
+    Math.round((now - job.stageStartedAt) / 1000),
+  );
+
+  recordStageDuration(stageKey, durationSeconds);
+}
+
+function recordStageDuration(stageKey, durationSeconds) {
+  const stats = stageDurationStats[stageKey];
+  if (!stats) {
+    return;
+  }
+
+  const bounded = Math.max(1, Math.min(3600, Number(durationSeconds) || 1));
+  const nextSampleCount = Math.min(200, stats.samples + 1);
+  const alpha = stats.samples === 0 ? 1 : 0.25;
+
+  stats.avgSeconds = Math.round(
+    stats.avgSeconds * (1 - alpha) + bounded * alpha,
+  );
+  stats.samples = nextSampleCount;
+}
+
+function getStageEstimatedSeconds(stageKey) {
+  const stats = stageDurationStats[stageKey];
+  if (stats && Number.isFinite(stats.avgSeconds) && stats.avgSeconds > 0) {
+    return stats.avgSeconds;
+  }
+
+  return STAGE_DEFAULT_DURATIONS_SECONDS[stageKey] || 5;
+}
+
+function calculateDynamicEtaSeconds(job, now) {
+  if (!job || job.status === "done" || job.status === "failed") {
+    return 0;
+  }
+
+  if (job.status !== "running") {
+    return STAGE_SEQUENCE.reduce(
+      (sum, stageKey) => sum + getStageEstimatedSeconds(stageKey),
+      0,
+    );
+  }
+
+  const stageKey = String(job.stageKey || "");
+  const stageIndex = STAGE_SEQUENCE.indexOf(stageKey);
+  const stageElapsedSeconds = Math.max(
+    0,
+    Math.round((now - Number(job.stageStartedAt || now)) / 1000),
+  );
+  const elapsedSeconds = Math.max(
+    1,
+    Math.round((now - Number(job.startedAt || now)) / 1000),
+  );
+
+  const currentStageEstimate = getStageEstimatedSeconds(stageKey);
+  const remainingCurrentStageSeconds =
+    stageElapsedSeconds <= currentStageEstimate
+      ? currentStageEstimate - stageElapsedSeconds
+      : Math.max(2, Math.round(stageElapsedSeconds * 0.2));
+
+  const remainingStageKeys =
+    stageIndex >= 0 ? STAGE_SEQUENCE.slice(stageIndex + 1) : STAGE_SEQUENCE;
+
+  const remainingStagesEstimate = remainingStageKeys.reduce(
+    (sum, key) => sum + getStageEstimatedSeconds(key),
+    0,
+  );
+
+  const etaByStages = Math.max(
+    1,
+    Math.round(remainingCurrentStageSeconds + remainingStagesEstimate),
+  );
+
+  const progress = Math.max(1, Math.min(99, Number(job.progress) || 1));
+  const ratio = progress / 100;
+  const etaByProgress = Math.max(
+    1,
+    Math.round((elapsedSeconds * (1 - ratio)) / ratio),
+  );
+
+  const blended = Math.round(etaByStages * 0.7 + etaByProgress * 0.3);
+  return Math.max(1, blended);
+}
+
+function broadcastActiveJobStatuses() {
+  for (const jobId of buildStatusSubscribers.keys()) {
+    const job = buildJobs.get(jobId);
+    if (!job) {
+      continue;
+    }
+
+    if (job.status === "running" || job.status === "queued") {
+      broadcastJobStatus(jobId);
+    }
+  }
 }
 
 function addBuildStatusSubscriber(jobId, socket) {
@@ -471,21 +611,25 @@ function toPascalToken(token) {
 }
 
 function sanitizeDisplayName(name) {
-  const cleaned = name
+  const cleaned = String(name || "")
     .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "")
     .replace(/\s+/g, " ")
     .trim();
 
-  return cleaned || "DesktopApp";
+  const limited = cleaned.slice(0, APP_NAME_MAX_LENGTH).trim();
+
+  return limited || "DesktopApp";
 }
 
 function slugifyName(name) {
-  const slug = name
+  const slug = String(name || "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 
-  return slug || "desktop-app";
+  const limited = slug.slice(0, APP_SLUG_MAX_LENGTH).replace(/-+$/g, "");
+
+  return limited || "desktop-app";
 }
 
 async function writeIconFile(urlObj, assetsDir, customLogoBuffer = null) {

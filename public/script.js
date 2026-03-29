@@ -19,11 +19,9 @@ let userEditedAppName = false;
 let analyzeTimer = null;
 let analyzeController = null;
 let statusPollTimer = null;
-let etaTickTimer = null;
 let statusSocket = null;
 let wsFallbackTimer = null;
 let latestServerJob = null;
-let latestServerJobTimestamp = 0;
 let activeJobId = "";
 let detectedLogoUrl = "";
 let customLogoObjectUrl = "";
@@ -160,7 +158,6 @@ async function analyzeUrl(rawUrl) {
 function startBuildStatusUpdates(jobId) {
   stopRealtimeUpdates();
   activeJobId = jobId;
-  startEtaTicker();
 
   const wsEnabled = connectStatusSocket(jobId);
   if (!wsEnabled) {
@@ -266,7 +263,6 @@ function startStatusPolling(jobId) {
 
 function handleJobUpdate(job) {
   latestServerJob = job;
-  latestServerJobTimestamp = Date.now();
   renderBuildProgress(job);
 
   if (job.status === "done") {
@@ -287,35 +283,6 @@ function handleJobUpdate(job) {
   }
 }
 
-function startEtaTicker() {
-  if (etaTickTimer) {
-    clearInterval(etaTickTimer);
-  }
-
-  etaTickTimer = setInterval(() => {
-    if (!latestServerJob || isJobTerminal(latestServerJob)) {
-      return;
-    }
-
-    const deltaSeconds = Math.max(
-      0,
-      Math.floor((Date.now() - latestServerJobTimestamp) / 1000),
-    );
-
-    const estimatedJob = {
-      ...latestServerJob,
-      etaSeconds: Math.max(
-        0,
-        Number(latestServerJob.etaSeconds || 0) - deltaSeconds,
-      ),
-      elapsedSeconds:
-        Number(latestServerJob.elapsedSeconds || 0) + deltaSeconds,
-    };
-
-    renderBuildProgress(estimatedJob);
-  }, 1000);
-}
-
 function renderBuildProgress(job) {
   stageLabel.textContent = job.stageLabel || "Processing";
 
@@ -324,8 +291,15 @@ function renderBuildProgress(job) {
   progressBar.style.width = `${progress}%`;
   progressBar.parentElement.setAttribute("aria-valuenow", String(progress));
 
-  etaLabel.textContent = `ETA: ${formatDuration(job.etaSeconds)}`;
-  elapsedLabel.textContent = `Elapsed: ${formatDuration(job.elapsedSeconds)}`;
+  const etaText = isJobTerminal(job)
+    ? "0s"
+    : formatDuration(job.etaSeconds, {
+        fallback: "Calculating...",
+        minOneSecond: true,
+      });
+
+  etaLabel.textContent = `ETA: ${etaText}`;
+  elapsedLabel.textContent = `Elapsed: ${formatDuration(job.elapsedSeconds, { fallback: "0s" })}`;
 
   if (job.appName) {
     previewName.textContent = appNameInput.value.trim() || job.appName;
@@ -333,7 +307,7 @@ function renderBuildProgress(job) {
 
   if (job.status === "running") {
     setStatus(
-      `${job.stageLabel || "Processing"} (${progress}%) - ETA ${formatDuration(job.etaSeconds)}`,
+      `${job.stageLabel || "Processing"} (${progress}%) - ETA ${etaText}`,
       "",
     );
   }
@@ -373,12 +347,11 @@ function resetBuildUiForStart() {
   buildButton.disabled = true;
   downloadLink.classList.add("hidden");
   latestServerJob = null;
-  latestServerJobTimestamp = 0;
 
   renderBuildProgress({
     stageLabel: "Queued",
     progress: 1,
-    etaSeconds: 230,
+    etaSeconds: null,
     elapsedSeconds: 0,
     stageKey: "validating",
     status: "running",
@@ -413,11 +386,6 @@ function stopRealtimeUpdates() {
   if (statusPollTimer) {
     clearInterval(statusPollTimer);
     statusPollTimer = null;
-  }
-
-  if (etaTickTimer) {
-    clearInterval(etaTickTimer);
-    etaTickTimer = null;
   }
 
   if (wsFallbackTimer) {
@@ -471,17 +439,28 @@ function clampPercent(value) {
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
-function formatDuration(totalSeconds) {
+function formatDuration(totalSeconds, options = {}) {
+  const fallback = String(options.fallback || "--");
+  const minOneSecond = Boolean(options.minOneSecond);
   const safe = Number(totalSeconds);
-  if (!Number.isFinite(safe) || safe <= 0) {
-    return "< 1m";
+  if (!Number.isFinite(safe)) {
+    return fallback;
   }
 
-  const minutes = Math.floor(safe / 60);
-  const seconds = safe % 60;
+  let roundedSeconds = Math.round(safe);
+  if (minOneSecond && roundedSeconds <= 0) {
+    roundedSeconds = 1;
+  }
+
+  if (roundedSeconds < 0) {
+    return fallback;
+  }
+
+  const minutes = Math.floor(roundedSeconds / 60);
+  const seconds = roundedSeconds % 60;
 
   if (minutes <= 0) {
-    return `${seconds}s`;
+    return `${roundedSeconds}s`;
   }
 
   if (seconds === 0) {
