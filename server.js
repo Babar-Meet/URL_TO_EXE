@@ -8,6 +8,7 @@ const { exec } = require("child_process");
 const { PNG } = require("pngjs");
 const pngToIco = require("png-to-ico");
 const sharp = require("sharp");
+const multer = require("multer");
 const { parse: parseDomain } = require("tldts");
 
 const app = express();
@@ -35,11 +36,18 @@ const BUILD_STAGES = {
     progress: 45,
     etaSeconds: 180,
   },
-  packaging: { label: "Packaging Windows EXE", progress: 82, etaSeconds: 80 },
+  packaging: { label: "Packaging instant EXE", progress: 82, etaSeconds: 80 },
   finalizing: { label: "Finalizing output", progress: 96, etaSeconds: 20 },
   done: { label: "Completed", progress: 100, etaSeconds: 0 },
   failed: { label: "Failed", progress: 100, etaSeconds: 0 },
 };
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 8 * 1024 * 1024,
+  },
+});
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(PUBLIC_DIR));
@@ -87,8 +95,10 @@ app.get("/logo", async (req, res) => {
   }
 });
 
-app.post("/build", (req, res) => {
+app.post("/build", upload.single("logoFile"), (req, res) => {
   const { url, appName } = req.body || {};
+  const uploadedLogoBuffer =
+    req.file && Buffer.isBuffer(req.file.buffer) ? req.file.buffer : null;
 
   let normalizedUrl;
   try {
@@ -115,13 +125,16 @@ app.post("/build", (req, res) => {
     updatedAt: startedAt,
     appName: resolvedAppName,
     url: normalizedUrl,
+    hasCustomLogo: Boolean(uploadedLogoBuffer),
     downloadUrl: null,
     error: null,
   });
 
-  runBuildJob(jobId, normalizedUrl, resolvedAppName).catch(() => {
-    // The job object is updated inside runBuildJob on error.
-  });
+  runBuildJob(jobId, normalizedUrl, resolvedAppName, uploadedLogoBuffer).catch(
+    () => {
+      // The job object is updated inside runBuildJob on error.
+    },
+  );
 
   return res.status(202).json({ success: true, jobId });
 });
@@ -150,6 +163,7 @@ app.get("/build-status/:jobId", (req, res) => {
         Math.round((Date.now() - job.startedAt) / 1000),
       ),
       appName: job.appName,
+      hasCustomLogo: Boolean(job.hasCustomLogo),
       downloadUrl: job.downloadUrl,
       error: job.error,
     },
@@ -168,6 +182,31 @@ app.get("/download/:fileName", async (req, res) => {
   }
 });
 
+app.use((error, _req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return res.status(400).json({
+        success: false,
+        error: "Uploaded logo is too large. Maximum size is 8MB.",
+      });
+    }
+
+    return res.status(400).json({
+      success: false,
+      error: "Logo upload failed. Please use a valid image file.",
+    });
+  }
+
+  if (error) {
+    return res.status(500).json({
+      success: false,
+      error: "Unexpected server error.",
+    });
+  }
+
+  return next();
+});
+
 app.listen(PORT, async () => {
   await fs.mkdir(TEMP_DIR, { recursive: true });
   await fs.mkdir(OUTPUT_DIR, { recursive: true });
@@ -177,7 +216,7 @@ app.listen(PORT, async () => {
   console.log(`URL to EXE builder running at http://localhost:${PORT}`);
 });
 
-async function runBuildJob(jobId, normalizedUrl, appName) {
+async function runBuildJob(jobId, normalizedUrl, appName, customLogoBuffer) {
   const urlObj = new URL(normalizedUrl);
   const jobDir = path.join(TEMP_DIR, jobId);
   const assetsDir = path.join(jobDir, "assets");
@@ -187,7 +226,7 @@ async function runBuildJob(jobId, normalizedUrl, appName) {
 
     setJobStage(jobId, "fetchingLogo");
     await fs.mkdir(assetsDir, { recursive: true });
-    await writeIconFile(urlObj, assetsDir);
+    await writeIconFile(urlObj, assetsDir, customLogoBuffer);
 
     setJobStage(jobId, "preparingProject");
     await writeElectronProject(jobDir, normalizedUrl, appName);
@@ -200,7 +239,7 @@ async function runBuildJob(jobId, normalizedUrl, appName) {
     setJobStage(jobId, "packaging");
     await runCommand(
       "npx",
-      ["electron-builder", "--win", "nsis", "--publish", "never"],
+      ["electron-builder", "--win", "portable", "--publish", "never"],
       jobDir,
       { timeoutMs: 1000 * 60 * 8 },
     );
@@ -346,14 +385,17 @@ function slugifyName(name) {
   return slug || "desktop-app";
 }
 
-async function writeIconFile(urlObj, assetsDir) {
+async function writeIconFile(urlObj, assetsDir, customLogoBuffer = null) {
   const iconPath = path.join(assetsDir, "icon.ico");
 
-  let sourceBuffer = null;
-  try {
-    sourceBuffer = await fetchFaviconBuffer(urlObj, 12000);
-  } catch (_error) {
-    sourceBuffer = null;
+  let sourceBuffer = customLogoBuffer;
+
+  if (!sourceBuffer) {
+    try {
+      sourceBuffer = await fetchFaviconBuffer(urlObj, 12000);
+    } catch (_error) {
+      sourceBuffer = null;
+    }
   }
 
   const icoBuffer = await buildSizedIco(sourceBuffer);
@@ -576,7 +618,7 @@ app.on('window-all-closed', () => {
     author: "URL to EXE Builder",
     main: "main.js",
     scripts: {
-      build: "electron-builder --win nsis --publish never",
+      build: "electron-builder --win portable --publish never",
     },
     devDependencies: {
       electron: "^31.7.7",
@@ -591,7 +633,7 @@ app.on('window-all-closed', () => {
       files: ["main.js", "package.json", "assets/**/*"],
       asar: true,
       win: {
-        target: "nsis",
+        target: "portable",
         icon: "assets/icon.ico",
       },
     },
@@ -610,32 +652,36 @@ function runCommand(command, args, cwd, options = {}) {
   const commandLine = [command, ...args.map(quoteShellArg)].join(" ");
 
   return new Promise((resolve, reject) => {
-    exec(commandLine, {
-      cwd,
-      windowsHide: true,
-      env: process.env,
-      timeout: timeoutMs > 0 ? timeoutMs : undefined,
-      maxBuffer: 1024 * 1024 * 30,
-    }, (error, stdout, stderr) => {
-      if (!error) {
-        return resolve({
-          stdout: String(stdout || ""),
-          stderr: String(stderr || ""),
-        });
-      }
+    exec(
+      commandLine,
+      {
+        cwd,
+        windowsHide: true,
+        env: process.env,
+        timeout: timeoutMs > 0 ? timeoutMs : undefined,
+        maxBuffer: 1024 * 1024 * 30,
+      },
+      (error, stdout, stderr) => {
+        if (!error) {
+          return resolve({
+            stdout: String(stdout || ""),
+            stderr: String(stderr || ""),
+          });
+        }
 
-      if (error.killed && timeoutMs > 0) {
+        if (error.killed && timeoutMs > 0) {
+          return reject(
+            new Error(`Command timed out after ${timeoutMs}ms: ${commandLine}`),
+          );
+        }
+
         return reject(
-          new Error(`Command timed out after ${timeoutMs}ms: ${commandLine}`),
+          new Error(
+            `Command failed: ${commandLine}\n${String(stdout || "")}\n${String(stderr || error.message || "")}`,
+          ),
         );
-      }
-
-      return reject(
-        new Error(
-          `Command failed: ${commandLine}\n${String(stdout || "")}\n${String(stderr || error.message || "")}`,
-        ),
-      );
-    });
+      },
+    );
   });
 }
 
@@ -666,6 +712,22 @@ async function findBuiltExe(distDir) {
 
   if (exeFiles.length === 0) {
     return null;
+  }
+
+  const portableExe = exeFiles.find((exePath) =>
+    path.basename(exePath).toLowerCase().includes("portable"),
+  );
+
+  if (portableExe) {
+    return portableExe;
+  }
+
+  const appExe = exeFiles.find(
+    (exePath) => !path.basename(exePath).toLowerCase().includes("setup"),
+  );
+
+  if (appExe) {
+    return appExe;
   }
 
   const setupExe = exeFiles.find((exePath) =>

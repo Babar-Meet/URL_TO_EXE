@@ -1,5 +1,6 @@
 const urlInput = document.getElementById("urlInput");
 const appNameInput = document.getElementById("appNameInput");
+const logoInput = document.getElementById("logoInput");
 const buildForm = document.getElementById("buildForm");
 const buildButton = document.getElementById("buildButton");
 const statusBox = document.getElementById("status");
@@ -18,6 +19,8 @@ let userEditedAppName = false;
 let analyzeTimer = null;
 let analyzeController = null;
 let statusPollTimer = null;
+let detectedLogoUrl = "";
+let customLogoObjectUrl = "";
 
 urlInput.addEventListener("input", () => {
   if (!urlInput.value.trim()) {
@@ -39,6 +42,31 @@ appNameInput.addEventListener("input", () => {
   previewName.textContent = appNameInput.value.trim() || "-";
 });
 
+logoInput.addEventListener("change", () => {
+  if (customLogoObjectUrl) {
+    URL.revokeObjectURL(customLogoObjectUrl);
+    customLogoObjectUrl = "";
+  }
+
+  const file = logoInput.files && logoInput.files[0];
+  if (file) {
+    customLogoObjectUrl = URL.createObjectURL(file);
+    logoPreview.src = customLogoObjectUrl;
+    logoPreview.classList.add("ready");
+    insights.classList.remove("hidden");
+    return;
+  }
+
+  if (detectedLogoUrl) {
+    logoPreview.src = `${detectedLogoUrl}&_=${Date.now()}`;
+    logoPreview.classList.add("ready");
+    return;
+  }
+
+  logoPreview.removeAttribute("src");
+  logoPreview.classList.remove("ready");
+});
+
 buildForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
@@ -49,16 +77,24 @@ buildForm.addEventListener("submit", async (event) => {
   }
 
   const appName = appNameInput.value.trim();
+  const logoFile = logoInput.files && logoInput.files[0];
 
   stopPolling();
   resetBuildUiForStart();
   setStatus("", "");
 
   try {
+    const payload = new FormData();
+    payload.append("url", url);
+    payload.append("appName", appName);
+
+    if (logoFile) {
+      payload.append("logoFile", logoFile);
+    }
+
     const response = await fetch("/build", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, appName }),
+      body: payload,
     });
 
     const data = await response.json();
@@ -100,6 +136,7 @@ async function analyzeUrl(rawUrl) {
     }
 
     insights.classList.remove("hidden");
+    detectedLogoUrl = data.logoUrl || "";
 
     if (!userEditedAppName) {
       appNameInput.value = data.appName || "";
@@ -107,8 +144,8 @@ async function analyzeUrl(rawUrl) {
 
     previewName.textContent = appNameInput.value.trim() || data.appName || "-";
 
-    if (data.logoUrl) {
-      logoPreview.src = `${data.logoUrl}&_=${Date.now()}`;
+    if (detectedLogoUrl && !hasCustomLogoSelected()) {
+      logoPreview.src = `${detectedLogoUrl}&_=${Date.now()}`;
       logoPreview.classList.add("ready");
     }
   } catch (_error) {
@@ -232,6 +269,7 @@ function resetBuildUiForStart() {
 
 function resetInsights() {
   insights.classList.add("hidden");
+  detectedLogoUrl = "";
   logoPreview.removeAttribute("src");
   logoPreview.classList.remove("ready");
   previewName.textContent = "-";
@@ -241,6 +279,10 @@ function resetInsights() {
   etaLabel.textContent = "ETA: --";
   elapsedLabel.textContent = "Elapsed: --";
   markStageProgress("", "idle");
+}
+
+function hasCustomLogoSelected() {
+  return Boolean(logoInput.files && logoInput.files.length > 0);
 }
 
 function stopPolling() {

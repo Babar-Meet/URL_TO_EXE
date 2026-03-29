@@ -11,7 +11,7 @@
       <section class="card">
         <h1>Website URL To Windows EXE</h1>
         <p class="subtitle">
-          Turn any website into a desktop app installer in one click.
+          Turn any website into an instant-open desktop EXE.
         </p>
 
         <form id="buildForm">
@@ -31,6 +31,17 @@
             type="text"
             placeholder="Auto-generated from URL"
           />
+
+          <label for="logoInput">Logo (Optional)</label>
+          <input
+            id="logoInput"
+            name="logoFile"
+            type="file"
+            accept=".ico,.png,.jpg,.jpeg,.webp,.bmp,.gif"
+          />
+          <p class="field-note">
+            Upload your own logo to override auto-fetched favicon.
+          </p>
 
           <button id="buildButton" type="submit">Generate EXE</button>
         </form>
