@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>URL To EXE Builder</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <section class="card">
+        <h1>Website URL To Windows EXE</h1>
+        <p class="subtitle">
+          Turn any website into a desktop app installer in one click.
+        </p>
+
+        <form id="buildForm">
+          <label for="urlInput">Website URL</label>
+          <input
+            id="urlInput"
+            name="url"
+            type="text"
+            placeholder="https://example.com"
+            required
+          />
+
+          <label for="appNameInput">App Name</label>
+          <input
+            id="appNameInput"
+            name="appName"
+            type="text"
+            placeholder="Auto-generated from URL"
+          />
+
+          <button id="buildButton" type="submit">Generate EXE</button>
+        </form>
+
+        <section id="insights" class="insights hidden" aria-live="polite">
+          <div class="app-preview">
+            <img id="logoPreview" class="logo" alt="App logo preview" />
+            <div>
+              <p class="label">Detected App</p>
+              <p id="previewName" class="preview-name">-</p>
+            </div>
+          </div>
+
+          <div class="progress-wrap">
+            <div class="progress-meta">
+              <span id="stageLabel">Waiting...</span>
+              <span id="progressPercent">0%</span>
+            </div>
+            <div
+              class="progress-track"
+              role="progressbar"
+              aria-label="Build progress"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+            >
+              <div id="progressBar" class="progress-fill"></div>
+            </div>
+            <div class="eta-wrap">
+              <span id="etaLabel">ETA: --</span>
+              <span id="elapsedLabel">Elapsed: --</span>
+            </div>
+          </div>
+
+          <ul id="stageList" class="stage-list">
+            <li data-stage="validating">Validate URL</li>
+            <li data-stage="fetchingLogo">Fetch Logo</li>
+            <li data-stage="preparingProject">Prepare Project</li>
+            <li data-stage="installingDeps">Install Dependencies</li>
+            <li data-stage="packaging">Package EXE</li>
+            <li data-stage="finalizing">Finalize Output</li>
+          </ul>
+        </section>
+
+        <div id="status" class="status hidden"></div>
+
+        <a id="downloadLink" class="download hidden" href="#" download>
+          Download EXE
+        </a>
+      </section>
+    </main>
+
+    <script src="script.js"></script>
+  </body>
+</html>
