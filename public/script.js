@@ -1,5 +1,6 @@
 const urlInput = document.getElementById("urlInput");
 const appNameInput = document.getElementById("appNameInput");
+const appTitleInput = document.getElementById("appTitleInput");
 const logoInput = document.getElementById("logoInput");
 const buildForm = document.getElementById("buildForm");
 const buildButton = document.getElementById("buildButton");
@@ -16,6 +17,7 @@ const elapsedLabel = document.getElementById("elapsedLabel");
 const stageList = document.getElementById("stageList");
 
 let userEditedAppName = false;
+let userEditedAppTitle = false;
 let analyzeTimer = null;
 let analyzeController = null;
 let statusPollTimer = null;
@@ -32,6 +34,9 @@ urlInput.addEventListener("input", () => {
     if (!userEditedAppName) {
       appNameInput.value = "";
     }
+    if (!userEditedAppTitle) {
+      appTitleInput.value = "";
+    }
     return;
   }
 
@@ -43,7 +48,16 @@ urlInput.addEventListener("input", () => {
 
 appNameInput.addEventListener("input", () => {
   userEditedAppName = appNameInput.value.trim().length > 0;
-  previewName.textContent = appNameInput.value.trim() || "-";
+  const nextAppName = appNameInput.value.trim();
+  previewName.textContent = nextAppName || "-";
+
+  if (!userEditedAppTitle) {
+    appTitleInput.value = nextAppName;
+  }
+});
+
+appTitleInput.addEventListener("input", () => {
+  userEditedAppTitle = appTitleInput.value.trim().length > 0;
 });
 
 logoInput.addEventListener("change", () => {
@@ -80,6 +94,7 @@ buildForm.addEventListener("submit", async (event) => {
   }
 
   const appName = appNameInput.value.trim();
+  const appTitle = appTitleInput.value.trim();
   const logoFile = logoInput.files && logoInput.files[0];
 
   stopRealtimeUpdates();
@@ -90,6 +105,7 @@ buildForm.addEventListener("submit", async (event) => {
     const payload = new FormData();
     payload.append("url", url);
     payload.append("appName", appName);
+    payload.append("appTitle", appTitle);
 
     if (logoFile) {
       payload.append("logoFile", logoFile);
@@ -142,6 +158,10 @@ async function analyzeUrl(rawUrl) {
 
     if (!userEditedAppName) {
       appNameInput.value = data.appName || "";
+    }
+
+    if (!userEditedAppTitle) {
+      appTitleInput.value = data.appTitle || data.appName || "";
     }
 
     previewName.textContent = appNameInput.value.trim() || data.appName || "-";

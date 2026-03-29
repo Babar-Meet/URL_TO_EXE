@@ -22,6 +22,7 @@ const TEMP_DIR = path.join(ROOT_DIR, "temp");
 const OUTPUT_DIR = path.join(ROOT_DIR, "output");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const APP_NAME_MAX_LENGTH = 80;
+const APP_TITLE_MAX_LENGTH = 120;
 const APP_SLUG_MAX_LENGTH = 60;
 
 const buildJobs = new Map();
@@ -133,9 +134,10 @@ app.get("/analyze", async (req, res) => {
   try {
     const normalized = normalizeUrl(String(url || ""));
     const appName = deriveAppName(normalized);
+    const appTitle = appName;
     const logoUrl = `/logo?url=${encodeURIComponent(normalized)}`;
 
-    return res.json({ success: true, appName, logoUrl });
+    return res.json({ success: true, appName, appTitle, logoUrl });
   } catch (_error) {
     return res.status(400).json({ success: false, error: "Invalid URL." });
   }
@@ -167,7 +169,7 @@ app.get("/logo", async (req, res) => {
 });
 
 app.post("/build", upload.single("logoFile"), (req, res) => {
-  const { url, appName } = req.body || {};
+  const { url, appName, appTitle } = req.body || {};
   const uploadedLogoBuffer =
     req.file && Buffer.isBuffer(req.file.buffer) ? req.file.buffer : null;
 
@@ -180,6 +182,9 @@ app.post("/build", upload.single("logoFile"), (req, res) => {
 
   const resolvedAppName = sanitizeDisplayName(
     String(appName || "").trim() || deriveAppName(normalizedUrl),
+  );
+  const resolvedAppTitle = sanitizeWindowTitle(
+    String(appTitle || "").trim() || resolvedAppName,
   );
 
   const jobId = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
@@ -195,17 +200,22 @@ app.post("/build", upload.single("logoFile"), (req, res) => {
     startedAt,
     updatedAt: startedAt,
     appName: resolvedAppName,
+    appTitle: resolvedAppTitle,
     url: normalizedUrl,
     hasCustomLogo: Boolean(uploadedLogoBuffer),
     downloadUrl: null,
     error: null,
   });
 
-  runBuildJob(jobId, normalizedUrl, resolvedAppName, uploadedLogoBuffer).catch(
-    () => {
-      // The job object is updated inside runBuildJob on error.
-    },
-  );
+  runBuildJob(
+    jobId,
+    normalizedUrl,
+    resolvedAppName,
+    resolvedAppTitle,
+    uploadedLogoBuffer,
+  ).catch(() => {
+    // The job object is updated inside runBuildJob on error.
+  });
 
   return res.status(202).json({ success: true, jobId });
 });
@@ -270,7 +280,13 @@ server.listen(PORT, async () => {
   console.log(`URL to EXE builder running at http://localhost:${PORT}`);
 });
 
-async function runBuildJob(jobId, normalizedUrl, appName, customLogoBuffer) {
+async function runBuildJob(
+  jobId,
+  normalizedUrl,
+  appName,
+  appTitle,
+  customLogoBuffer,
+) {
   const urlObj = new URL(normalizedUrl);
   const jobDir = path.join(TEMP_DIR, jobId);
   const assetsDir = path.join(jobDir, "assets");
@@ -283,7 +299,7 @@ async function runBuildJob(jobId, normalizedUrl, appName, customLogoBuffer) {
     await writeIconFile(urlObj, assetsDir, customLogoBuffer);
 
     setJobStage(jobId, "preparingProject");
-    await writeElectronProject(jobDir, normalizedUrl, appName);
+    await writeElectronProject(jobDir, normalizedUrl, appName, appTitle);
 
     setJobStage(jobId, "installingDeps");
     await runCommand("npm", ["install", "--no-audit", "--no-fund"], jobDir, {
@@ -304,7 +320,9 @@ async function runBuildJob(jobId, normalizedUrl, appName, customLogoBuffer) {
       throw new Error("Build completed, but no EXE was produced.");
     }
 
-    const outputFileName = `${slugifyName(appName)}-${jobId}.exe`;
+    const outputFileName = await getAvailableOutputFileName(
+      slugifyName(appName),
+    );
     const finalOutputPath = path.join(OUTPUT_DIR, outputFileName);
 
     await fs.mkdir(OUTPUT_DIR, { recursive: true });
@@ -381,6 +399,7 @@ function formatJobPayload(job) {
     etaSeconds: calculateDynamicEtaSeconds(job, now),
     elapsedSeconds: Math.max(0, Math.round((now - job.startedAt) / 1000)),
     appName: job.appName,
+    appTitle: job.appTitle,
     hasCustomLogo: Boolean(job.hasCustomLogo),
     downloadUrl: job.downloadUrl,
     error: job.error,
@@ -621,6 +640,16 @@ function sanitizeDisplayName(name) {
   return limited || "DesktopApp";
 }
 
+function sanitizeWindowTitle(title) {
+  const cleaned = String(title || "")
+    .replace(/[\u0000-\u001F]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const limited = cleaned.slice(0, APP_TITLE_MAX_LENGTH).trim();
+  return limited || "DesktopApp";
+}
+
 function slugifyName(name) {
   const slug = String(name || "")
     .toLowerCase()
@@ -630,6 +659,24 @@ function slugifyName(name) {
   const limited = slug.slice(0, APP_SLUG_MAX_LENGTH).replace(/-+$/g, "");
 
   return limited || "desktop-app";
+}
+
+async function getAvailableOutputFileName(baseSlug) {
+  const safeBase = slugifyName(baseSlug);
+  let suffix = 0;
+
+  while (true) {
+    const fileName =
+      suffix === 0 ? `${safeBase}.exe` : `${safeBase}-${suffix + 1}.exe`;
+    const filePath = path.join(OUTPUT_DIR, fileName);
+
+    try {
+      await fs.access(filePath);
+      suffix += 1;
+    } catch (_error) {
+      return fileName;
+    }
+  }
 }
 
 async function writeIconFile(urlObj, assetsDir, customLogoBuffer = null) {
@@ -811,17 +858,31 @@ function createFallbackPng() {
   return PNG.sync.write(png);
 }
 
-async function writeElectronProject(jobDir, targetUrl, appName) {
+async function writeElectronProject(jobDir, targetUrl, appName, appTitle) {
   const escapedUrl = JSON.stringify(targetUrl);
+  const escapedTitle = JSON.stringify(appTitle);
 
   const mainJs = `const { app, BrowserWindow, shell } = require('electron');
 
 const TARGET_URL = ${escapedUrl};
+const APP_TITLE = ${escapedTitle};
+
+function enforceTitle(win) {
+  if (win.isDestroyed()) {
+    return;
+  }
+
+  win.setTitle(APP_TITLE);
+  win.webContents
+    .executeJavaScript('document.title = ' + JSON.stringify(APP_TITLE) + ';', true)
+    .catch(() => {});
+}
 
 function createWindow() {
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
+    title: APP_TITLE,
     icon: 'assets/icon.ico',
     autoHideMenuBar: true,
     webPreferences: {
@@ -835,7 +896,25 @@ function createWindow() {
     return { action: 'deny' };
   });
 
+  win.on('page-title-updated', (event) => {
+    event.preventDefault();
+    enforceTitle(win);
+  });
+
+  win.webContents.on('did-finish-load', () => {
+    enforceTitle(win);
+  });
+
+  win.webContents.on('did-navigate', () => {
+    enforceTitle(win);
+  });
+
+  win.webContents.on('did-navigate-in-page', () => {
+    enforceTitle(win);
+  });
+
   win.loadURL(TARGET_URL);
+  enforceTitle(win);
 }
 
 app.whenReady().then(() => {
