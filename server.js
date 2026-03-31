@@ -24,6 +24,12 @@ const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const APP_NAME_MAX_LENGTH = 80;
 const APP_TITLE_MAX_LENGTH = 120;
 const APP_SLUG_MAX_LENGTH = 60;
+const AUTOMATION_STEP_MAX = 120;
+const AUTOMATION_DEFAULT_DELAY_MS = 500;
+const AUTOMATION_MAX_DELAY_MS = 600000;
+const AUTOMATION_SELECTOR_MAX_LENGTH = 400;
+const AUTOMATION_VALUE_MAX_LENGTH = 4000;
+const AUTOMATION_KEY_MAX_LENGTH = 200;
 
 const buildJobs = new Map();
 const buildStatusSubscribers = new Map();
@@ -169,7 +175,8 @@ app.get("/logo", async (req, res) => {
 });
 
 app.post("/build", upload.single("logoFile"), (req, res) => {
-  const { url, appName, appTitle } = req.body || {};
+  const { url, appName, appTitle, automation, automationEnabled } =
+    req.body || {};
   const uploadedLogoBuffer =
     req.file && Buffer.isBuffer(req.file.buffer) ? req.file.buffer : null;
 
@@ -187,6 +194,16 @@ app.post("/build", upload.single("logoFile"), (req, res) => {
     String(appTitle || "").trim() || resolvedAppName,
   );
 
+  let automationSteps = [];
+  try {
+    automationSteps = parseAutomationSteps(automation, automationEnabled);
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      error: simplifyError(error),
+    });
+  }
+
   const jobId = `${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
   const startedAt = Date.now();
 
@@ -203,6 +220,7 @@ app.post("/build", upload.single("logoFile"), (req, res) => {
     appTitle: resolvedAppTitle,
     url: normalizedUrl,
     hasCustomLogo: Boolean(uploadedLogoBuffer),
+    automationStepCount: automationSteps.length,
     downloadUrl: null,
     error: null,
   });
@@ -213,6 +231,7 @@ app.post("/build", upload.single("logoFile"), (req, res) => {
     resolvedAppName,
     resolvedAppTitle,
     uploadedLogoBuffer,
+    automationSteps,
   ).catch(() => {
     // The job object is updated inside runBuildJob on error.
   });
@@ -286,6 +305,7 @@ async function runBuildJob(
   appName,
   appTitle,
   customLogoBuffer,
+  automationSteps,
 ) {
   const urlObj = new URL(normalizedUrl);
   const jobDir = path.join(TEMP_DIR, jobId);
@@ -299,7 +319,13 @@ async function runBuildJob(
     await writeIconFile(urlObj, assetsDir, customLogoBuffer);
 
     setJobStage(jobId, "preparingProject");
-    await writeElectronProject(jobDir, normalizedUrl, appName, appTitle);
+    await writeElectronProject(
+      jobDir,
+      normalizedUrl,
+      appName,
+      appTitle,
+      automationSteps,
+    );
 
     setJobStage(jobId, "installingDeps");
     await runCommand("npm", ["install", "--no-audit", "--no-fund"], jobDir, {
@@ -650,6 +676,199 @@ function sanitizeWindowTitle(title) {
   return limited || "DesktopApp";
 }
 
+function parseAutomationSteps(rawAutomation, rawEnabledFlag) {
+  const enabled =
+    String(rawEnabledFlag || "")
+      .trim()
+      .toLowerCase() === "true";
+
+  if (!enabled) {
+    return [];
+  }
+
+  if (typeof rawAutomation === "undefined" || rawAutomation === null) {
+    return [];
+  }
+
+  let parsed = rawAutomation;
+
+  if (typeof rawAutomation === "string") {
+    try {
+      parsed = JSON.parse(rawAutomation);
+    } catch (_error) {
+      throw new Error("Invalid automation steps format.");
+    }
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error("Automation steps must be an array.");
+  }
+
+  return parsed
+    .slice(0, AUTOMATION_STEP_MAX)
+    .map((step) => sanitizeAutomationStep(step))
+    .filter(Boolean);
+}
+
+function sanitizeAutomationStep(step) {
+  if (!step || typeof step !== "object" || Array.isArray(step)) {
+    return null;
+  }
+
+  const type = normalizeAutomationType(step.type);
+  if (!type) {
+    return null;
+  }
+
+  const normalizedStep = {
+    type,
+    delay: sanitizeAutomationDelay(step.delay),
+  };
+
+  if (
+    type === "type" ||
+    type === "click" ||
+    type === "radio" ||
+    type === "select"
+  ) {
+    normalizedStep.selector = sanitizeAutomationSelector(step.selector);
+  }
+
+  if (type === "type" || type === "select" || type === "localStorage") {
+    normalizedStep.value = sanitizeAutomationValue(step.value);
+  }
+
+  if (type === "localStorage") {
+    normalizedStep.key = sanitizeAutomationKey(step.key);
+  }
+
+  if (type === "wait") {
+    normalizedStep.value = sanitizeAutomationDelay(step.value);
+  }
+
+  return normalizedStep;
+}
+
+function normalizeAutomationType(type) {
+  const normalized = String(type || "")
+    .trim()
+    .toLowerCase();
+
+  if (
+    normalized === "type" ||
+    normalized === "type text" ||
+    normalized === "typetext"
+  ) {
+    return "type";
+  }
+
+  if (
+    normalized === "click" ||
+    normalized === "click element" ||
+    normalized === "clickelement"
+  ) {
+    return "click";
+  }
+
+  if (
+    normalized === "radio" ||
+    normalized === "select radio button" ||
+    normalized === "selectradiobutton"
+  ) {
+    return "radio";
+  }
+
+  if (
+    normalized === "select" ||
+    normalized === "dropdown" ||
+    normalized === "select dropdown option" ||
+    normalized === "selectdropdownoption"
+  ) {
+    return "select";
+  }
+
+  if (
+    normalized === "localstorage" ||
+    normalized === "set localstorage" ||
+    normalized === "setlocalstorage"
+  ) {
+    return "localStorage";
+  }
+
+  if (
+    normalized === "wait" ||
+    normalized === "wait (delay)" ||
+    normalized === "wait(delay)"
+  ) {
+    return "wait";
+  }
+
+  return "";
+}
+
+function sanitizeAutomationSelector(selector) {
+  const trimmed = String(selector || "")
+    .trim()
+    .slice(0, AUTOMATION_SELECTOR_MAX_LENGTH);
+
+  if (!trimmed) {
+    return "";
+  }
+
+  if (looksLikeCssSelector(trimmed)) {
+    return trimmed;
+  }
+
+  return toIdSelector(trimmed);
+}
+
+function looksLikeCssSelector(selector) {
+  const firstChar = selector.charAt(0);
+
+  if (
+    firstChar === "#" ||
+    firstChar === "." ||
+    firstChar === "[" ||
+    firstChar === ":" ||
+    firstChar === "*"
+  ) {
+    return true;
+  }
+
+  return /[\s>+~,:[\]()=]/.test(selector);
+}
+
+function toIdSelector(value) {
+  if (/^[A-Za-z_][A-Za-z0-9_-]*$/.test(value)) {
+    return `#${value}`;
+  }
+
+  return `[id="${escapeCssAttributeValue(value)}"]`;
+}
+
+function escapeCssAttributeValue(value) {
+  return String(value).replace(/["\\]/g, "\\$&");
+}
+
+function sanitizeAutomationValue(value) {
+  return String(value ?? "").slice(0, AUTOMATION_VALUE_MAX_LENGTH);
+}
+
+function sanitizeAutomationKey(key) {
+  return String(key || "")
+    .trim()
+    .slice(0, AUTOMATION_KEY_MAX_LENGTH);
+}
+
+function sanitizeAutomationDelay(delay) {
+  const n = Number(delay);
+  if (!Number.isFinite(n)) {
+    return AUTOMATION_DEFAULT_DELAY_MS;
+  }
+
+  return Math.max(0, Math.min(AUTOMATION_MAX_DELAY_MS, Math.round(n)));
+}
+
 function slugifyName(name) {
   const slug = String(name || "")
     .toLowerCase()
@@ -858,14 +1077,37 @@ function createFallbackPng() {
   return PNG.sync.write(png);
 }
 
-async function writeElectronProject(jobDir, targetUrl, appName, appTitle) {
+async function writeElectronProject(
+  jobDir,
+  targetUrl,
+  appName,
+  appTitle,
+  automationSteps = [],
+) {
   const escapedUrl = JSON.stringify(targetUrl);
   const escapedTitle = JSON.stringify(appTitle);
+  const escapedAutomation = JSON.stringify(automationSteps);
 
   const mainJs = `const { app, BrowserWindow, shell } = require('electron');
 
 const TARGET_URL = ${escapedUrl};
 const APP_TITLE = ${escapedTitle};
+const AUTOMATION_STEPS = ${escapedAutomation};
+const DEFAULT_STEP_DELAY_MS = ${AUTOMATION_DEFAULT_DELAY_MS};
+const MAX_STEP_DELAY_MS = ${AUTOMATION_MAX_DELAY_MS};
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function toDelay(value, fallback = DEFAULT_STEP_DELAY_MS) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return fallback;
+  }
+
+  return Math.max(0, Math.min(MAX_STEP_DELAY_MS, Math.round(n)));
+}
 
 function enforceTitle(win) {
   if (win.isDestroyed()) {
@@ -878,7 +1120,96 @@ function enforceTitle(win) {
     .catch(() => {});
 }
 
+async function runRendererStep(win, step) {
+  if (win.isDestroyed() || win.webContents.isDestroyed()) {
+    return;
+  }
+
+  const script = [
+    '(() => {',
+    '  const step = ' + JSON.stringify(step) + ';',
+    "  const selector = typeof step.selector === 'string' ? step.selector : '';",
+    "  const value = step.value == null ? '' : String(step.value);",
+    "  const key = typeof step.key === 'string' ? step.key : '';",
+    '  const getElement = () => {',
+    '    if (!selector) {',
+    '      return null;',
+    '    }',
+    '    try {',
+    '      return document.querySelector(selector);',
+    '    } catch (_selectorError) {',
+    '      return null;',
+    '    }',
+    '  };',
+    '  switch (step.type) {',
+    "    case 'type': {",
+    '      const element = getElement();',
+    '      if (!element) return;',
+    '      element.value = value;',
+    "      element.dispatchEvent(new Event('input', { bubbles: true }));",
+    "      element.dispatchEvent(new Event('change', { bubbles: true }));",
+    '      return;',
+    '    }',
+    "    case 'click':",
+    "    case 'radio': {",
+    '      const element = getElement();',
+    "      if (!element || typeof element.click !== 'function') return;",
+    '      element.click();',
+    '      return;',
+    '    }',
+    "    case 'select': {",
+    '      const element = getElement();',
+    '      if (!element) return;',
+    '      element.value = value;',
+    "      element.dispatchEvent(new Event('input', { bubbles: true }));",
+    "      element.dispatchEvent(new Event('change', { bubbles: true }));",
+    '      return;',
+    '    }',
+    "    case 'localStorage': {",
+    '      if (!key) return;',
+    '      localStorage.setItem(key, value);',
+    '      return;',
+    '    }',
+    '    default:',
+    '      return;',
+    '  }',
+    '})();',
+  ].join('\\n');
+
+  await win.webContents.executeJavaScript(script, true).catch(() => {});
+}
+
+async function runAutomation(win) {
+  if (!Array.isArray(AUTOMATION_STEPS) || AUTOMATION_STEPS.length === 0) {
+    return;
+  }
+
+  for (let i = 0; i < AUTOMATION_STEPS.length; i += 1) {
+    if (win.isDestroyed() || win.webContents.isDestroyed()) {
+      return;
+    }
+
+    const step = AUTOMATION_STEPS[i] || {};
+
+    try {
+      if (step.type === 'wait') {
+        await sleep(toDelay(step.value));
+      } else {
+        await runRendererStep(win, step);
+      }
+
+      if (i < AUTOMATION_STEPS.length - 1) {
+        await sleep(toDelay(step.delay));
+      }
+    } catch (_error) {
+      // Continue silently when a step fails.
+    }
+  }
+}
+
 function createWindow() {
+  let automationHasRun = false;
+
   const win = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -903,6 +1234,11 @@ function createWindow() {
 
   win.webContents.on('did-finish-load', () => {
     enforceTitle(win);
+
+    if (!automationHasRun) {
+      automationHasRun = true;
+      runAutomation(win).catch(() => {});
+    }
   });
 
   win.webContents.on('did-navigate', () => {

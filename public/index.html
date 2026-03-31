@@ -60,6 +60,45 @@
                 Upload your own logo to override auto-fetched favicon.
               </p>
 
+              <section
+                class="automation-section"
+                aria-labelledby="automationTitle"
+              >
+                <div class="automation-header">
+                  <h2 id="automationTitle">Automation Steps (Optional)</h2>
+                  <label class="toggle-wrap" for="automationEnabled">
+                    <input
+                      id="automationEnabled"
+                      name="automationEnabled"
+                      type="checkbox"
+                    />
+                    <span class="toggle-track" aria-hidden="true">
+                      <span class="toggle-thumb"></span>
+                    </span>
+                    <span class="toggle-label">Enable</span>
+                  </label>
+                </div>
+
+                <p class="field-note">
+                  Add simple page actions like click, type, select, and wait.
+                </p>
+                <p class="field-note">
+                  For selector fields, paste either an element ID like
+                  txtUsername or a full CSS selector like #txtUsername.
+                </p>
+
+                <div id="automationPanel" class="automation-panel hidden">
+                  <div id="automationSteps" class="automation-steps"></div>
+                  <button
+                    id="addAutomationStepButton"
+                    class="secondary-button"
+                    type="button"
+                  >
+                    Add Step
+                  </button>
+                </div>
+              </section>
+
               <button id="buildButton" type="submit">Generate EXE</button>
             </form>
           </section>

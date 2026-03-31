@@ -2,6 +2,12 @@ const urlInput = document.getElementById("urlInput");
 const appNameInput = document.getElementById("appNameInput");
 const appTitleInput = document.getElementById("appTitleInput");
 const logoInput = document.getElementById("logoInput");
+const automationEnabledInput = document.getElementById("automationEnabled");
+const automationPanel = document.getElementById("automationPanel");
+const automationStepsContainer = document.getElementById("automationSteps");
+const addAutomationStepButton = document.getElementById(
+  "addAutomationStepButton",
+);
 const buildForm = document.getElementById("buildForm");
 const buildButton = document.getElementById("buildButton");
 const statusBox = document.getElementById("status");
@@ -16,6 +22,65 @@ const etaLabel = document.getElementById("etaLabel");
 const elapsedLabel = document.getElementById("elapsedLabel");
 const stageList = document.getElementById("stageList");
 
+const DEFAULT_AUTOMATION_DELAY_MS = 500;
+const MAX_AUTOMATION_STEPS = 120;
+const AUTOMATION_ACTIONS = [
+  {
+    value: "type",
+    label: "Type Text",
+    requiresSelector: true,
+    requiresValue: true,
+    valueLabel: "Value",
+    requiresKey: false,
+    valueIsNumeric: false,
+  },
+  {
+    value: "click",
+    label: "Click Element",
+    requiresSelector: true,
+    requiresValue: false,
+    valueLabel: "",
+    requiresKey: false,
+    valueIsNumeric: false,
+  },
+  {
+    value: "radio",
+    label: "Select Radio Button",
+    requiresSelector: true,
+    requiresValue: false,
+    valueLabel: "",
+    requiresKey: false,
+    valueIsNumeric: false,
+  },
+  {
+    value: "select",
+    label: "Select Dropdown Option",
+    requiresSelector: true,
+    requiresValue: true,
+    valueLabel: "Option Value",
+    requiresKey: false,
+    valueIsNumeric: false,
+  },
+  {
+    value: "localStorage",
+    label: "Set LocalStorage",
+    requiresSelector: false,
+    requiresValue: true,
+    valueLabel: "Value",
+    requiresKey: true,
+    valueIsNumeric: false,
+  },
+  {
+    value: "wait",
+    label: "Wait (Delay)",
+    requiresSelector: false,
+    requiresValue: true,
+    valueLabel: "Wait (ms)",
+    requiresKey: false,
+    valueIsNumeric: true,
+  },
+];
+
 let userEditedAppName = false;
 let userEditedAppTitle = false;
 let analyzeTimer = null;
@@ -27,6 +92,7 @@ let latestServerJob = null;
 let activeJobId = "";
 let detectedLogoUrl = "";
 let customLogoObjectUrl = "";
+let automationSteps = [];
 
 urlInput.addEventListener("input", () => {
   if (!urlInput.value.trim()) {
@@ -84,6 +150,20 @@ logoInput.addEventListener("change", () => {
   logoPreview.classList.remove("ready");
 });
 
+if (automationEnabledInput) {
+  automationEnabledInput.addEventListener("change", () => {
+    setAutomationEnabled(Boolean(automationEnabledInput.checked));
+  });
+}
+
+if (addAutomationStepButton) {
+  addAutomationStepButton.addEventListener("click", () => {
+    addAutomationStep();
+  });
+}
+
+initializeAutomationUi();
+
 buildForm.addEventListener("submit", async (event) => {
   event.preventDefault();
 
@@ -96,6 +176,7 @@ buildForm.addEventListener("submit", async (event) => {
   const appName = appNameInput.value.trim();
   const appTitle = appTitleInput.value.trim();
   const logoFile = logoInput.files && logoInput.files[0];
+  const automationPayload = buildAutomationPayload();
 
   stopRealtimeUpdates();
   resetBuildUiForStart();
@@ -106,6 +187,14 @@ buildForm.addEventListener("submit", async (event) => {
     payload.append("url", url);
     payload.append("appName", appName);
     payload.append("appTitle", appTitle);
+    payload.append(
+      "automationEnabled",
+      automationPayload.enabled ? "true" : "false",
+    );
+
+    if (automationPayload.enabled) {
+      payload.append("automation", JSON.stringify(automationPayload.steps));
+    }
 
     if (logoFile) {
       payload.append("logoFile", logoFile);
@@ -173,6 +262,378 @@ async function analyzeUrl(rawUrl) {
   } catch (_error) {
     // Ignore analyze errors while typing.
   }
+}
+
+function initializeAutomationUi() {
+  if (!automationEnabledInput || !automationPanel) {
+    return;
+  }
+
+  setAutomationEnabled(Boolean(automationEnabledInput.checked));
+}
+
+function setAutomationEnabled(enabled) {
+  if (!automationEnabledInput || !automationPanel) {
+    return;
+  }
+
+  const isEnabled = Boolean(enabled);
+  automationEnabledInput.checked = isEnabled;
+  automationPanel.classList.toggle("hidden", !isEnabled);
+
+  if (isEnabled && automationSteps.length === 0) {
+    addAutomationStep();
+    return;
+  }
+
+  renderAutomationSteps();
+}
+
+function addAutomationStep(initialType = "click") {
+  if (automationSteps.length >= MAX_AUTOMATION_STEPS) {
+    setStatus(
+      `You can add up to ${MAX_AUTOMATION_STEPS} automation steps.`,
+      "error",
+    );
+    return;
+  }
+
+  automationSteps.push(createAutomationStep(initialType));
+  renderAutomationSteps();
+}
+
+function createAutomationStep(initialType) {
+  const stepType = normalizeAutomationType(initialType);
+  const defaults = {
+    id: generateAutomationStepId(),
+    type: stepType,
+    selector: "",
+    value: "",
+    key: "",
+    delay: DEFAULT_AUTOMATION_DELAY_MS,
+  };
+
+  if (stepType === "wait") {
+    defaults.value = DEFAULT_AUTOMATION_DELAY_MS;
+  }
+
+  return defaults;
+}
+
+function generateAutomationStepId() {
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function renderAutomationSteps() {
+  if (!automationStepsContainer) {
+    return;
+  }
+
+  automationStepsContainer.textContent = "";
+
+  if (automationSteps.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-automation";
+    empty.textContent = "No automation steps added yet.";
+    automationStepsContainer.appendChild(empty);
+    return;
+  }
+
+  automationSteps.forEach((step, index) => {
+    const action = getAutomationActionConfig(step.type);
+    const card = document.createElement("article");
+    card.className = "automation-step-card";
+
+    const header = document.createElement("div");
+    header.className = "automation-step-header";
+
+    const title = document.createElement("p");
+    title.className = "automation-step-title";
+    title.textContent = `Step ${index + 1}`;
+
+    const controls = document.createElement("div");
+    controls.className = "automation-step-controls";
+
+    const moveUpButton = document.createElement("button");
+    moveUpButton.type = "button";
+    moveUpButton.className = "step-control-button";
+    moveUpButton.textContent = "Up";
+    moveUpButton.disabled = index === 0;
+    moveUpButton.addEventListener("click", () => {
+      moveAutomationStep(index, -1);
+    });
+
+    const moveDownButton = document.createElement("button");
+    moveDownButton.type = "button";
+    moveDownButton.className = "step-control-button";
+    moveDownButton.textContent = "Down";
+    moveDownButton.disabled = index === automationSteps.length - 1;
+    moveDownButton.addEventListener("click", () => {
+      moveAutomationStep(index, 1);
+    });
+
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = "step-control-button danger";
+    removeButton.textContent = "Remove";
+    removeButton.addEventListener("click", () => {
+      removeAutomationStep(index);
+    });
+
+    controls.appendChild(moveUpButton);
+    controls.appendChild(moveDownButton);
+    controls.appendChild(removeButton);
+
+    header.appendChild(title);
+    header.appendChild(controls);
+    card.appendChild(header);
+
+    const fields = document.createElement("div");
+    fields.className = "automation-fields";
+
+    const actionSelect = document.createElement("select");
+    AUTOMATION_ACTIONS.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.value;
+      option.textContent = item.label;
+      if (item.value === action.value) {
+        option.selected = true;
+      }
+      actionSelect.appendChild(option);
+    });
+
+    actionSelect.addEventListener("change", () => {
+      automationSteps[index].type = normalizeAutomationType(actionSelect.value);
+      if (automationSteps[index].type === "wait") {
+        automationSteps[index].value = sanitizeAutomationWaitValue(
+          automationSteps[index].value,
+        );
+      }
+      renderAutomationSteps();
+    });
+
+    fields.appendChild(createAutomationField("Action Type", actionSelect));
+
+    const selectorInput = document.createElement("input");
+    selectorInput.type = "text";
+    selectorInput.placeholder = "rblRole_1 or #rblRole_1";
+    selectorInput.value = String(step.selector || "");
+    selectorInput.addEventListener("input", () => {
+      automationSteps[index].selector = selectorInput.value;
+    });
+    const selectorField = createAutomationField(
+      "Selector (ID or CSS)",
+      selectorInput,
+    );
+    selectorField.classList.toggle("hidden", !action.requiresSelector);
+    fields.appendChild(selectorField);
+
+    const valueInput = document.createElement("input");
+    valueInput.type = action.valueIsNumeric ? "number" : "text";
+    valueInput.placeholder = action.valueIsNumeric ? "2000" : "Enter value";
+    if (action.valueIsNumeric) {
+      valueInput.min = "0";
+      valueInput.step = "100";
+      valueInput.value = String(sanitizeAutomationWaitValue(step.value));
+      valueInput.addEventListener("change", () => {
+        const safeWait = sanitizeAutomationWaitValue(valueInput.value);
+        automationSteps[index].value = safeWait;
+        valueInput.value = String(safeWait);
+      });
+    } else {
+      valueInput.value = String(step.value || "");
+      valueInput.addEventListener("input", () => {
+        automationSteps[index].value = valueInput.value;
+      });
+    }
+    const valueField = createAutomationField(
+      action.valueLabel || "Value",
+      valueInput,
+    );
+    valueField.classList.toggle("hidden", !action.requiresValue);
+    fields.appendChild(valueField);
+
+    const keyInput = document.createElement("input");
+    keyInput.type = "text";
+    keyInput.placeholder = "storageKey";
+    keyInput.value = String(step.key || "");
+    keyInput.addEventListener("input", () => {
+      automationSteps[index].key = keyInput.value;
+    });
+    const keyField = createAutomationField("Key", keyInput);
+    keyField.classList.toggle("hidden", !action.requiresKey);
+    fields.appendChild(keyField);
+
+    const delayInput = document.createElement("input");
+    delayInput.type = "number";
+    delayInput.min = "0";
+    delayInput.step = "100";
+    delayInput.value = String(sanitizeAutomationDelay(step.delay));
+    delayInput.addEventListener("change", () => {
+      const safeDelay = sanitizeAutomationDelay(delayInput.value);
+      automationSteps[index].delay = safeDelay;
+      delayInput.value = String(safeDelay);
+    });
+    fields.appendChild(createAutomationField("Delay (ms)", delayInput));
+
+    card.appendChild(fields);
+    automationStepsContainer.appendChild(card);
+  });
+}
+
+function createAutomationField(labelText, control) {
+  const wrapper = document.createElement("label");
+  wrapper.className = "automation-field";
+
+  const title = document.createElement("span");
+  title.className = "automation-field-label";
+  title.textContent = labelText;
+
+  wrapper.appendChild(title);
+  wrapper.appendChild(control);
+
+  return wrapper;
+}
+
+function moveAutomationStep(index, direction) {
+  const nextIndex = index + direction;
+  if (nextIndex < 0 || nextIndex >= automationSteps.length) {
+    return;
+  }
+
+  const [step] = automationSteps.splice(index, 1);
+  automationSteps.splice(nextIndex, 0, step);
+  renderAutomationSteps();
+}
+
+function removeAutomationStep(index) {
+  if (index < 0 || index >= automationSteps.length) {
+    return;
+  }
+
+  automationSteps.splice(index, 1);
+  renderAutomationSteps();
+}
+
+function buildAutomationPayload() {
+  const enabled = Boolean(
+    automationEnabledInput && automationEnabledInput.checked,
+  );
+  if (!enabled) {
+    return { enabled: false, steps: [] };
+  }
+
+  const steps = automationSteps.slice(0, MAX_AUTOMATION_STEPS).map((step) => {
+    const action = getAutomationActionConfig(step.type);
+    const normalized = {
+      type: action.value,
+      delay: sanitizeAutomationDelay(step.delay),
+    };
+
+    if (action.requiresSelector) {
+      normalized.selector = sanitizeAutomationSelector(step.selector);
+    }
+
+    if (action.requiresValue) {
+      normalized.value = action.valueIsNumeric
+        ? sanitizeAutomationWaitValue(step.value)
+        : sanitizeAutomationValue(step.value);
+    }
+
+    if (action.requiresKey) {
+      normalized.key = sanitizeAutomationKey(step.key);
+    }
+
+    return normalized;
+  });
+
+  return { enabled: true, steps };
+}
+
+function getAutomationActionConfig(type) {
+  const normalizedType = normalizeAutomationType(type);
+  return (
+    AUTOMATION_ACTIONS.find((action) => action.value === normalizedType) ||
+    AUTOMATION_ACTIONS[0]
+  );
+}
+
+function normalizeAutomationType(value) {
+  const normalized = String(value || "").trim();
+  const found = AUTOMATION_ACTIONS.find((item) => item.value === normalized);
+  return found ? found.value : "click";
+}
+
+function sanitizeAutomationSelector(selector) {
+  const trimmed = String(selector || "")
+    .trim()
+    .slice(0, 400);
+
+  if (!trimmed) {
+    return "";
+  }
+
+  if (looksLikeCssSelector(trimmed)) {
+    return trimmed;
+  }
+
+  return toIdSelector(trimmed);
+}
+
+function looksLikeCssSelector(selector) {
+  const firstChar = selector.charAt(0);
+
+  if (
+    firstChar === "#" ||
+    firstChar === "." ||
+    firstChar === "[" ||
+    firstChar === ":" ||
+    firstChar === "*"
+  ) {
+    return true;
+  }
+
+  return /[\s>+~,:[\]()=]/.test(selector);
+}
+
+function toIdSelector(value) {
+  if (/^[A-Za-z_][A-Za-z0-9_-]*$/.test(value)) {
+    return `#${value}`;
+  }
+
+  return `[id="${escapeCssAttributeValue(value)}"]`;
+}
+
+function escapeCssAttributeValue(value) {
+  return String(value).replace(/["\\]/g, "\\$&");
+}
+
+function sanitizeAutomationValue(value) {
+  return String(value ?? "").slice(0, 4000);
+}
+
+function sanitizeAutomationKey(value) {
+  return String(value || "")
+    .trim()
+    .slice(0, 200);
+}
+
+function sanitizeAutomationWaitValue(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return DEFAULT_AUTOMATION_DELAY_MS;
+  }
+
+  return Math.max(0, Math.min(600000, Math.round(n)));
+}
+
+function sanitizeAutomationDelay(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    return DEFAULT_AUTOMATION_DELAY_MS;
+  }
+
+  return Math.max(0, Math.min(600000, Math.round(n)));
 }
 
 function startBuildStatusUpdates(jobId) {

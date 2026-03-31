@@ -108,7 +108,8 @@ label {
   color: #2b2b2b;
 }
 
-input {
+input,
+select {
   width: 100%;
   border: 1px solid var(--color-border);
   border-radius: 4px;
@@ -123,7 +124,8 @@ input::placeholder {
   color: var(--color-placeholder);
 }
 
-input:focus {
+input:focus,
+select:focus {
   outline: 2px solid rgba(33, 150, 243, 0.35);
   outline-offset: 1px;
   border-color: var(--color-focus);
@@ -133,6 +135,213 @@ input:focus {
   margin: 2px 0 0;
   color: var(--color-text-muted);
   font-size: 12px;
+}
+
+.automation-section {
+  margin-top: 14px;
+  border: 1px solid #dde5ef;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.automation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.automation-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.2;
+  color: #0f172a;
+}
+
+.toggle-wrap {
+  margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#automationEnabled {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.toggle-track {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid #bac7d8;
+  background: #e2e8f0;
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 1px solid #d6dbe3;
+  transition: transform 0.18s ease;
+}
+
+#automationEnabled:checked + .toggle-track {
+  background: #2196f3;
+  border-color: #2196f3;
+}
+
+#automationEnabled:checked + .toggle-track .toggle-thumb {
+  transform: translateX(20px);
+}
+
+#automationEnabled:focus-visible + .toggle-track {
+  outline: 2px solid rgba(33, 150, 243, 0.4);
+  outline-offset: 2px;
+}
+
+.toggle-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #334155;
+}
+
+.automation-panel {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.automation-steps {
+  display: grid;
+  gap: 10px;
+}
+
+.empty-automation {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px dashed #cad5e3;
+  border-radius: 6px;
+  color: #64748b;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.automation-step-card {
+  border: 1px solid #d8e1ec;
+  border-radius: 8px;
+  background: #f8fbff;
+  padding: 10px;
+}
+
+.automation-step-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.automation-step-title {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: #1e293b;
+}
+
+.automation-step-controls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.automation-fields {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.automation-field {
+  margin: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #334155;
+}
+
+.automation-field-label {
+  display: inline-block;
+}
+
+.automation-field input,
+.automation-field select {
+  margin: 0;
+}
+
+.secondary-button,
+.step-control-button {
+  min-width: auto;
+  height: 34px;
+  margin-top: 0;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.secondary-button {
+  border: 1px solid #1f6fb2;
+  background: #1f6fb2;
+  color: #ffffff;
+}
+
+.secondary-button:hover {
+  background: #175b91;
+  border-color: #175b91;
+}
+
+.secondary-button:active {
+  background: #134a75;
+  border-color: #134a75;
+}
+
+.step-control-button {
+  border: 1px solid #cad5e3;
+  background: #ffffff;
+  color: #1f2937;
+}
+
+.step-control-button:hover {
+  border-color: #9cb4ce;
+  background: #f1f5f9;
+}
+
+.step-control-button:active {
+  background: #e2e8f0;
+}
+
+.step-control-button.danger {
+  border-color: #f5c2c0;
+  color: #b42318;
+}
+
+.step-control-button.danger:hover {
+  background: #fef3f2;
+  border-color: #f0a7a4;
 }
 
 button,
@@ -364,6 +573,15 @@ button:disabled {
 
   h1 {
     font-size: 1.6rem;
+  }
+
+  .automation-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .automation-fields {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
